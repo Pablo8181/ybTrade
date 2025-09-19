@@ -1,0 +1,60 @@
+name: CI Deploy a01_obb_pullDaily
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      IMAGE: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/trading/app:${{ github.sha }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          token_format: access_token
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT }}
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Build container image
+        run: |
+          docker build -t "$IMAGE" a_apps/a01_obb_pullDaily
+
+      - name: Push container image
+        run: |
+          docker push "$IMAGE"
+
+      - name: Deploy Cloud Run Job
+        run: |
+          gcloud run jobs deploy a01-obb-pullDaily \
+            --image "$IMAGE" \
+            --region "${{ secrets.GCP_REGION }}" \
+            --service-account "${{ secrets.RUNTIME_SA_EMAIL }}" \
+            --set-env-vars "DRY_RUN=true,PROJECT_ID=${{ secrets.GCP_PROJECT }}"
+
+      - name: Execute Cloud Run Job
+        run: |
+          gcloud run jobs execute a01-obb-pullDaily \
+            --region "${{ secrets.GCP_REGION }}" \
+            --wait
