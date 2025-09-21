@@ -1,26 +1,22 @@
+from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
 
-
-def build_payload() -> dict:
-    dry_run = os.getenv("DRY_RUN", "")
-    project_id = os.getenv("PROJECT_ID", "")
-
-    return {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "msg": "a01_obb_pullDaily DRY_RUN" if dry_run.lower() == "true" else "a01_obb_pullDaily",  # noqa: E501
-        "env": {
-            "DRY_RUN": dry_run,
-            "PROJECT_ID": project_id,
-        },
-    }
-
+def utc_now_iso() -> str:
+    """Return the current UTC time in ISO-8601 with Z suffix."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 def main() -> None:
-    payload = build_payload()
-    print(json.dumps(payload))
-
+    payload = {
+        "ts": utc_now_iso(),
+        "msg": "a01_obb_pullDaily DRY_RUN" if os.getenv("DRY_RUN", "").lower() == "true" else "a01_obb_pullDaily",
+        "env": {
+            "DRY_RUN": os.getenv("DRY_RUN", ""),
+            "PROJECT_ID": os.getenv("PROJECT_ID", ""),
+        },
+    }
+    print(json.dumps(payload, separators=(",", ":")))
 
 if __name__ == "__main__":
     main()

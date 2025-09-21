@@ -1,18 +1,27 @@
 ## Summary
-- What changed:
 - Why:
+- What:
+
+## Checklist
+- [ ] Patch Map provided below
+- [ ] Tests & Artifacts (CI logs, manual runs) captured below
+- [ ] Rollback plan documented
+- [ ] Security review complete (no secrets/keys committed)
+- [ ] Docs updated as needed (`README.md`, `docs/MASTER_BRIEF.md`, `docs/DECISIONS.md`, `docs/CHANGELOG.md`)
+- [ ] Backtest artifacts uploaded (if applicable):
+  - metrics.json
+  - equity.png, fills.csv
 
 ## Patch Map
-- Added: a_apps/a01_obb_pullDaily/main.py
-- Added: a_apps/a01_obb_pullDaily/Dockerfile
-- Added: .github/workflows/ci-deploy.yml
+- File / rationale mapping:
 
 ## Tests & Artifacts
-- CI steps: lint → build → push → deploy → run
-- Expected artifacts/logs:
+- Commands + evidence:
 
 ## Rollback
-- Revert this PR
+- Revert strategy:
+- Infra cleanup:
 
 ## Security
-- No secrets in code; uses OIDC/WIF
+- IAM / scopes touched:
+- Secrets management notes:
