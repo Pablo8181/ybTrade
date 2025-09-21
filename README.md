@@ -52,3 +52,17 @@ Option-C (Now)                  Threshold Gatekeeper                  Option-A (
 - [ ] Structured logs emit `YYYY-MM-DDTHH:mm:ss.sssZ [LEVEL] [mod] msg | k=v …`.
 - [ ] Data outputs respect UTF-8 LF, ISO-8601Z timestamps, stable schema, and append-only behavior.
 - [ ] Rollback plan documented in the PR (revert + delete/roll back Cloud Run job if required).
+
+### a01_bsp_pullDaily_sheet_full
+- **What:** Cloud Run Job that writes BTCUSDT 1d OHLCV **and all indicators** into Google Sheets tab `spot1d`.
+- **Why:** Single source of truth for your early PoC; later we may split raw vs features for scale.
+- **Secrets:** `SHEET_ID`, `GCP_PROJECT`, `GCP_WIF_PROVIDER`, `RUNTIME_SA_EMAIL`, `GCP_REGION`.
+- **Share:** Give Editor access to `${RUNTIME_SA_EMAIL}` on the Sheet.
+
+Run (manual):
+1. GitHub → Actions → **a01_bsp_pullDaily_sheet_full** → **Run workflow**
+2. Inputs (optional): `since=2017-01-01`, `provider=binance`, `symbol=BTCUSDT`
+3. Open the Sheet: verify tab **spot1d** has header + rows.
+
+Schema:
+Single header row exactly as in your Apps Script (`name (description)`), base columns first (12), then all indicators.
