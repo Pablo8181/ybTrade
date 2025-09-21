@@ -1,22 +1,23 @@
-name: CI Deploy a01_obb_pullDaily
+name: CI Deploy
 
 on:
   push:
     branches:
       - dev
   workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to comment on (optional)'
+        required: false
+        type: string
 
 permissions:
   contents: read
   id-token: write
 
 jobs:
-  build-and-deploy:
+  build-deploy-run:
     runs-on: ubuntu-latest
-
-    env:
-      IMAGE: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/trading/app:${{ github.sha }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,37 +25,57 @@ jobs:
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
-          token_format: access_token
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
-      - name: Set up gcloud
+      - name: Setup gcloud SDK
         uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ secrets.GCP_PROJECT }}
 
-      - name: Configure Docker for Artifact Registry
-        run: |
-          gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+      - name: Configure Artifact Registry auth
+        run: gcloud auth configure-docker "${{ secrets.GCP_REGION }}-docker.pkg.dev" --quiet
 
-      - name: Build container image
+      - name: Build and push image
+        working-directory: a_apps/a01_obb_pullDaily
         run: |
-          docker build -t "$IMAGE" a_apps/a01_obb_pullDaily
-
-      - name: Push container image
-        run: |
+          set -euo pipefail
+          IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/trading/app:${{ github.sha }}"
+          docker build -t "$IMAGE" .
           docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
       - name: Deploy Cloud Run Job
         run: |
+          set -euo pipefail
           gcloud run jobs deploy a01-obb-pullDaily \
             --image "$IMAGE" \
             --region "${{ secrets.GCP_REGION }}" \
             --service-account "${{ secrets.RUNTIME_SA_EMAIL }}" \
-            --set-env-vars "DRY_RUN=true,PROJECT_ID=${{ secrets.GCP_PROJECT }}"
+            --set-env-vars "DRY_RUN=true,PROJECT_ID=${{ secrets.GCP_PROJECT }}" \
+            --max-retries=0 \
+            --tasks=1 \
+            --set-deadline=600
 
       - name: Execute Cloud Run Job
         run: |
-          gcloud run jobs execute a01-obb-pullDaily \
-            --region "${{ secrets.GCP_REGION }}" \
-            --wait
+          set -euo pipefail
+          gcloud run jobs execute a01-obb-pullDaily --region "${{ secrets.GCP_REGION }}" --wait
+
+      - name: Capture latest execution status
+        id: execution-status
+        run: |
+          set -euo pipefail
+          STATUS=$(gcloud run jobs executions list --job a01-obb-pullDaily --region "${{ secrets.GCP_REGION }}" --limit 1 --format='value(STATUS)')
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+
+      - name: Post deployment comment
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.pr_number != ''
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.inputs.pr_number }}
+          body: |
+            **CI Deploy**
+            - Image: `${{ env.IMAGE }}`
+            - Job: `a01-obb-pullDaily` (`${{ secrets.GCP_REGION }}`)
+            - Latest execution status: `${{ steps.execution-status.outputs.status }}`
+            - Logs: https://console.cloud.google.com/logs/query;query=resource.type%3D%22cloud_run_job%22%0Aresource.labels.job_name%3D%22a01-obb-pullDaily%22&project=${{ secrets.GCP_PROJECT }}
