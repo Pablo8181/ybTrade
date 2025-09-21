@@ -16,7 +16,7 @@ Option-C (Now)                  Threshold Gatekeeper                  Option-A (
    - Optional: provide the pull request number when manually dispatching so the workflow posts deployment details back to the PR.
 2. **Run the daily job locally**
    ```bash
-   export DRY_RUN=true PROJECT_ID=warm-melody-458521-g7
+   export DRY_RUN=true PROJECT_ID=${PROJECT_ID:-"your-gcp-project-id"}
    python a_apps/a01_obb_pullDaily/main.py
    ```
 3. **Inspect Cloud Run job results**
