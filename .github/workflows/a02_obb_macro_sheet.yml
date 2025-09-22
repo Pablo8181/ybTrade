@@ -1,0 +1,71 @@
+name: a02_obb_macro_sheet
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Start date YYYY-MM-DD"
+        required: false
+        default: "2015-01-01"
+jobs:
+  build-deploy-run:
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Auth to GCP (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.RUNTIME_SA_EMAIL }}
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT }}
+      - name: Build & push image
+        run: |
+          set -euo pipefail
+          REGION="${{ secrets.GCP_REGION }}"
+          PROJ="${{ secrets.GCP_PROJECT }}"
+          REPO="trading"
+          IMAGE="${REGION}-docker.pkg.dev/${PROJ}/${REPO}/a02_obb_macro_sheet:$(git rev-parse --short HEAD)"
+          cat > Dockerfile <<'DOCKER'
+          FROM python:3.11-slim
+          WORKDIR /app
+          RUN pip install --no-cache-dir --upgrade pip
+          COPY a_apps/a02_obb_macro_sheet/requirements.txt .
+          RUN pip install --no-cache-dir -r requirements.txt
+          COPY a_apps/a02_obb_macro_sheet/ .
+          ENV PYTHONUNBUFFERED=1
+          ENTRYPOINT ["python","/app/main.py"]
+          DOCKER
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+      - name: Deploy Cloud Run Job
+        env:
+          SINCE_INPUT: ${{ github.event.inputs.since || '2015-01-01' }}
+        run: |
+          set -euo pipefail
+          gcloud run jobs deploy a02_obb_macro_sheet \
+            --image "$IMAGE" \
+            --region "${{ secrets.GCP_REGION }}" \
+            --service-account "${{ secrets.RUNTIME_SA_EMAIL }}" \
+            --set-env-vars SHEET_ID=${{ secrets.SHEET_ID }},SHEET_TAB=macro_daily,SINCE=${SINCE_INPUT},WRITE_MODE=replace \
+            --set-env-vars FRED_API_KEY=${{ secrets.FRED_API_KEY }} \
+            --max-retries 2 \
+            --timeout 600s
+      - name: Execute Job (wait)
+        run: gcloud run jobs execute a02_obb_macro_sheet --region "${{ secrets.GCP_REGION }}" --wait
+      - name: Comment PR (if any)
+        if: ${{ github.event.pull_request.number }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr comment ${{ github.event.pull_request.number }} --body "a02_obb_macro_sheet executed. Check **macro_daily** tab."

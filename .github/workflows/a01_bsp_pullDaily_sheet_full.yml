@@ -1,0 +1,76 @@
+name: a01_bsp_pullDaily_sheet_full
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Backfill since (YYYY-MM-DD)"
+        required: false
+        default: "2017-01-01"
+      provider:
+        description: "binance | openbb"
+        required: false
+        default: "binance"
+      symbol:
+        description: "Symbol (e.g., BTCUSDT)"
+        required: false
+        default: "BTCUSDT"
+jobs:
+  build-deploy-run:
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Auth to GCP (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.RUNTIME_SA_EMAIL }}
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT }}
+      - name: Build & push image
+        run: |
+          set -euo pipefail
+          REGION="${{ secrets.GCP_REGION }}"
+          PROJ="${{ secrets.GCP_PROJECT }}"
+          REPO="trading"
+          IMAGE="${REGION}-docker.pkg.dev/${PROJ}/${REPO}/a01_bsp_pullDaily_sheet_full:$(git rev-parse --short HEAD)"
+          cat > Dockerfile <<'DOCKER'
+          FROM python:3.11-slim
+          WORKDIR /app
+          COPY a_apps/a01_bsp_pullDaily_sheet_full/requirements.txt .
+          RUN pip install --no-cache-dir -r requirements.txt
+          COPY a_apps/a01_bsp_pullDaily_sheet_full/ .
+          ENTRYPOINT ["python","/app/main.py"]
+          DOCKER
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+      - name: Deploy Cloud Run Job
+        run: |
+          set -euo pipefail
+          gcloud run jobs deploy a01_bsp_pullDaily_sheet_full \
+            --image "$IMAGE" \
+            --region "${{ secrets.GCP_REGION }}" \
+            --service-account "${{ secrets.RUNTIME_SA_EMAIL }}" \
+            --set-env-vars SHEET_ID=${{ secrets.SHEET_ID }},SHEET_TAB=spot1d,WRITE_MODE=replace \
+            --set-env-vars PROVIDER=${{ github.event.inputs.provider || 'binance' }},SYMBOL=${{ github.event.inputs.symbol || 'BTCUSDT' }},SINCE=${{ github.event.inputs.since || '2017-01-01' }} \
+            --max-retries 2 \
+            --timeout 900s
+      - name: Execute Job (wait)
+        run: gcloud run jobs execute a01_bsp_pullDaily_sheet_full --region "${{ secrets.GCP_REGION }}" --wait
+      - name: Comment PR (if any)
+        if: ${{ github.event.pull_request.number }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body "a01_bsp_pullDaily_sheet_full executed: provider=${{ github.event.inputs.provider || 'binance' }}, symbol=${{ github.event.inputs.symbol || 'BTCUSDT' }}, since=${{ github.event.inputs.since || '2017-01-01' }}. Check Sheet tab **spot1d** for base+indicators."
