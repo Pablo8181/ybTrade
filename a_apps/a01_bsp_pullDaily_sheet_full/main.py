@@ -2,6 +2,8 @@ from __future__ import annotations
 import os, json, time, math, sys
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Tuple
+
+
 import requests
 
 # Google Sheets (ADC / WIF)
@@ -230,12 +232,19 @@ def build_header() -> List[str]:
 def _to_series(nums: List[Any]) -> List[float]:
     return [float(x) if _is_num(float(x)) else float('nan') for x in nums]
 
+
 def compute_all(rows: List[List[Any]]) -> Tuple[List[str], List[List[Any]]]:
     header = build_header()
     # Map raw Binance arrays → base columns with ms→string for times
     n = len(rows)
     if n==0:
         return header, []
+
+def compute_all(rows: List[List]) -> List[List]:
+    # Map raw Binance arrays → base columns with ms→string for times
+    n = len(rows)
+    if n==0: return []
+
     o_ms = [int(r[0]) for r in rows]
     o  = [float(r[1]) for r in rows]
     h  = [float(r[2]) for r in rows]
@@ -450,6 +459,9 @@ def compute_all(rows: List[List[Any]]) -> Tuple[List[str], List[List[Any]]]:
     fibA_382=fib(minSince,maxSince,0.382); fibA_500=fib(minSince,maxSince,0.5); fibA_618=fib(minSince,maxSince,0.618)
 
     # Assemble matrix (base + ind), preserving order
+
+    header = build_header()
+
     matrix=[]
     for i in range(n):
         base_row = [

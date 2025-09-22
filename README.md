@@ -59,6 +59,9 @@ Option-C (Now)                  Threshold Gatekeeper                  Option-A (
 - **Secrets:** `SHEET_ID`, `GCP_PROJECT`, `GCP_WIF_PROVIDER`, `RUNTIME_SA_EMAIL`, `GCP_REGION`.
 - **Share:** Give Editor access to `${RUNTIME_SA_EMAIL}` on the Sheet.
 
+- **Smoke write:** Run `python tools/verify/smoke_sheet_write.py` with `SHEET_ID` exported and optionally `SHEET_TAB`/`SHEET_CELL`/`SHEET_VALUE`. Defaults write the UTC timestamp into tab `smoke`, cell `A1` so you can confirm the service account has edit rights without touching production tabs.
+
+
 Run (manual):
 1. GitHub → Actions → **a01_bsp_pullDaily_sheet_full** → **Run workflow**
 2. Inputs (optional): `since=2017-01-01`, `provider=binance`, `symbol=BTCUSDT`
