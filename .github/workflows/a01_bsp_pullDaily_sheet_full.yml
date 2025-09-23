@@ -1,31 +1,16 @@
-name: a01_bsp_pullDaily_sheet_full
-
-on:
-  workflow_dispatch:
-    inputs:
-      since:
-        description: "Backfill since (YYYY-MM-DD)"
-        required: false
-        default: "2017-01-01"
-      provider:
-        description: "binance | openbb"
-        required: false
-        default: "binance"
-      symbol:
-        description: "Symbol (e.g., BTCUSDT)"
-        required: false
-        default: "BTCUSDT"
-
-jobs:
-  build-deploy-run:
-    permissions:
-      contents: read
-      id-token: write
-      pull-requests: write
-    runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate required secrets (fail early)
+        run: |
+          req=(WIF_PROVIDER WIF_SERVICE_ACCOUNT GCP_PROJECT GCP_REGION SHEET_ID)
+          for v in "${req[@]}"; do
+            if [ -z "${{ secrets.WIF_PROVIDER }}" ] && [ "$v" = "WIF_PROVIDER" ]; then echo "::error::Missing secret: WIF_PROVIDER"; exit 1; fi
+            if [ -z "${{ secrets.WIF_SERVICE_ACCOUNT }}" ] && [ "$v" = "WIF_SERVICE_ACCOUNT" ]; then echo "::error::Missing secret: WIF_SERVICE_ACCOUNT"; exit 1; fi
+            if [ -z "${{ secrets.GCP_PROJECT }}" ] && [ "$v" = "GCP_PROJECT" ]; then echo "::error::Missing secret: GCP_PROJECT"; exit 1; fi
+            if [ -z "${{ secrets.GCP_REGION }}" ] && [ "$v" = "GCP_REGION" ]; then echo "::error::Missing secret: GCP_REGION"; exit 1; fi
+            if [ -z "${{ secrets.SHEET_ID }}" ] && [ "$v" = "SHEET_ID" ]; then echo "::error::Missing secret: SHEET_ID"; exit 1; fi
+          done
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -38,8 +23,8 @@ jobs:
       - name: Auth to GCP (WIF)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-          service_account: ${{ secrets.RUNTIME_SA_EMAIL }}
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
@@ -53,7 +38,6 @@ jobs:
           PROJ="${{ secrets.GCP_PROJECT }}"
           REPO="trading"
           IMAGE="${REGION}-docker.pkg.dev/${PROJ}/${REPO}/a01_bsp_pullDaily_sheet_full:$(git rev-parse --short HEAD)"
-
           cat > Dockerfile <<'DOCKER'
           FROM python:3.11-slim
           WORKDIR /app
@@ -62,7 +46,6 @@ jobs:
           COPY a_apps/a01_bsp_pullDaily_sheet_full/ .
           ENTRYPOINT ["python","/app/main.py"]
           DOCKER
-
           gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
           docker build -t "$IMAGE" .
           docker push "$IMAGE"
@@ -71,20 +54,12 @@ jobs:
       - name: Deploy Cloud Run Job
         run: |
           set -euo pipefail
-          # Pull inputs with simple defaults
-          PROVIDER="${{ github.event.inputs.provider }}"
-          SYMBOL="${{ github.event.inputs.symbol }}"
-          SINCE="${{ github.event.inputs.since }}"
-          [ -z "$PROVIDER" ] && PROVIDER="binance"
-          [ -z "$SYMBOL" ] && SYMBOL="BTCUSDT"
-          [ -z "$SINCE" ] && SINCE="2017-01-01"
-
           gcloud run jobs deploy a01_bsp_pullDaily_sheet_full \
             --image "$IMAGE" \
             --region "${{ secrets.GCP_REGION }}" \
-            --service-account "${{ secrets.RUNTIME_SA_EMAIL }}" \
-            --set-env-vars "SHEET_ID=${{ secrets.SHEET_ID }},SHEET_TAB=spot1d,WRITE_MODE=replace" \
-            --set-env-vars "PROVIDER=${PROVIDER},SYMBOL=${SYMBOL},SINCE=${SINCE}" \
+            --service-account "${{ secrets.WIF_SERVICE_ACCOUNT }}" \
+            --set-env-vars SHEET_ID=${{ secrets.SHEET_ID }},SHEET_TAB=spot1d,WRITE_MODE=replace \
+            --set-env-vars PROVIDER=${{ github.event.inputs.provider || 'binance' }},SYMBOL=${{ github.event.inputs.symbol || 'BTCUSDT' }},SINCE=${{ github.event.inputs.since || '2017-01-01' }} \
             --max-retries 2 \
             --timeout 900s
 
