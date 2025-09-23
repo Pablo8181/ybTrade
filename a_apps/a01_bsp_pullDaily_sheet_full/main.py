@@ -493,7 +493,7 @@ def clear_data_rows(svc, sheet_id: str, tab: str):
     svc.spreadsheets().values().clear(
         spreadsheetId=sheet_id,
         range=f"{tab}!A2:ZZZ",
-        body={"requestBody": {}}
+        body={}
     ).execute()
 
 def append_rows(svc, sheet_id: str, tab: str, matrix: List[List]):
