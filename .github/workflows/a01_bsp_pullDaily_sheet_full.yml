@@ -32,16 +32,16 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Smoke check required secrets (presence only)
+      - name: Smoke check required secrets
         run: |
           set -euo pipefail
           req=(WIF_PROVIDER WIF_SERVICE_ACCOUNT GCP_PROJECT GCP_REGION SHEET_ID)
           for v in "${req[@]}"; do
-            if [ -z "${{ secrets.WIF_PROVIDER }}" ] && [ "$v" = "WIF_PROVIDER" ]; then echo "::error::Missing secret: WIF_PROVIDER"; exit 1; fi
-            if [ -z "${{ secrets.WIF_SERVICE_ACCOUNT }}" ] && [ "$v" = "WIF_SERVICE_ACCOUNT" ]; then echo "::error::Missing secret: WIF_SERVICE_ACCOUNT"; exit 1; fi
-            if [ -z "${{ secrets.GCP_PROJECT }}" ] && [ "$v" = "GCP_PROJECT" ]; then echo "::error::Missing secret: GCP_PROJECT"; exit 1; fi
-            if [ -z "${{ secrets.GCP_REGION }}" ] && [ "$v" = "GCP_REGION" ]; then echo "::error::Missing secret: GCP_REGION"; exit 1; fi
-            if [ -z "${{ secrets.SHEET_ID }}" ] && [ "$v" = "SHEET_ID" ]; then echo "::error::Missing secret: SHEET_ID"; exit 1; fi
+            [ -n "${{ secrets.WIF_PROVIDER }}" ]        || { echo "::error::Missing secret: WIF_PROVIDER"; exit 1; }
+            [ -n "${{ secrets.WIF_SERVICE_ACCOUNT }}" ] || { echo "::error::Missing secret: WIF_SERVICE_ACCOUNT"; exit 1; }
+            [ -n "${{ secrets.GCP_PROJECT }}" ]         || { echo "::error::Missing secret: GCP_PROJECT"; exit 1; }
+            [ -n "${{ secrets.GCP_REGION }}" ]          || { echo "::error::Missing secret: GCP_REGION"; exit 1; }
+            [ -n "${{ secrets.SHEET_ID }}" ]            || { echo "::error::Missing secret: SHEET_ID"; exit 1; }
           done
           echo "All required secrets are present."
 
@@ -59,22 +59,23 @@ jobs:
         with:
           project_id: ${{ secrets.GCP_PROJECT }}
 
-      - name: Build & push image (lowercase + ensure repo)
+      - name: Build & push image (all lowercase)
         run: |
           set -euo pipefail
 
-          REGION_RAW="${{ secrets.GCP_REGION }}"
-          PROJ_RAW="${{ secrets.GCP_PROJECT }}"
-          REGION="$(echo "$REGION_RAW" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n')"
-          PROJ="$(echo "$PROJ_RAW" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n')"
+          REGION="$(echo "${{ secrets.GCP_REGION }}"  | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n')"
+          PROJ="$(echo "${{ secrets.GCP_PROJECT }}" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n')"
 
           REPO="trading"  # must be lowercase
+          APP="a01_bsp_pulldaily_sheet_full"   # all lowercase + underscores allowed in repo path
           HOST="${REGION}-docker.pkg.dev"
-          IMAGE="${HOST}/${PROJ}/${REPO}/a01_bsp_pullDaily_sheet_full:$(git rev-parse --short HEAD)"
+          IMAGE="${HOST}/${PROJ}/${REPO}/${APP}:$(git rev-parse --short HEAD)"
 
-          echo "Using host: $HOST"
-          echo "Project: $PROJ"
+          echo "Host:   $HOST"
+          echo "Proj:   $PROJ"
           echo "Region: $REGION"
+          echo "Repo:   $REPO"
+          echo "App:    $APP"
           echo "Image:  $IMAGE"
 
           # Ensure Artifact Registry repo exists (idempotent)
@@ -84,7 +85,7 @@ jobs:
               --location="$REGION" \
               --description="Trading images"
 
-          # Login + build + push
+          # Auth Docker, build, push
           gcloud auth configure-docker "$HOST" --quiet
 
           cat > Dockerfile <<'DOCKER'
@@ -99,13 +100,16 @@ jobs:
           docker build -t "$IMAGE" .
           docker push "$IMAGE"
 
-          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+          echo "IMAGE=$IMAGE"  >> $GITHUB_ENV
           echo "REGION=$REGION" >> $GITHUB_ENV
 
-      - name: Deploy Cloud Run Job
+      - name: Deploy Cloud Run Job (hyphen name, lowercase)
         run: |
           set -euo pipefail
-          gcloud run jobs deploy a01_bsp_pullDaily_sheet_full \
+          JOB="a01-bsp-pulldaily-sheet-full"  # Cloud Run Job name: lowercase + hyphens only
+          echo "JOB=$JOB" >> $GITHUB_ENV
+
+          gcloud run jobs deploy "$JOB" \
             --image "$IMAGE" \
             --region "$REGION" \
             --service-account "${{ secrets.WIF_SERVICE_ACCOUNT }}" \
@@ -115,4 +119,4 @@ jobs:
             --timeout 900s
 
       - name: Execute Job (wait)
-        run: gcloud run jobs execute a01_bsp_pullDaily_sheet_full --region "$REGION" --wait
+        run: gcloud run jobs execute "$JOB" --region "$REGION" --wait
