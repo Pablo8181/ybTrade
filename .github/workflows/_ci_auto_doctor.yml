@@ -1,0 +1,117 @@
+name: CI Auto Doctor
+
+on:
+  workflow_dispatch:
+    inputs:
+      python_requirements_path:
+        description: "Path to requirements.txt (leave blank to skip Python install)"
+        required: false
+        default: "a_apps/a01_bsp_pullDaily_sheet_full/requirements.txt"
+      docker_context:
+        description: "Docker build context (leave blank to skip Docker build)"
+        required: false
+        default: ""
+      dockerfile:
+        description: "Dockerfile path (relative to repo root)"
+        required: false
+        default: "Dockerfile"
+      test_command:
+        description: "Optional shell command to run tests (e.g., pytest -q)"
+        required: false
+        default: ""
+
+jobs:
+  lint-and-validate:
+    name: Lint workflows & basic repo checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: actionlint (validate GitHub workflow YAML)
+        uses: rhysd/actionlint@v1
+        with:
+          # Fail the job on first error for fast feedback
+          args: -color
+
+      - name: Show workflow files
+        run: |
+          echo "== Workflows =="
+          ls -lah .github/workflows || true
+
+      - name: Basic YAML check (all .yml/.yaml)
+        run: |
+          set -euo pipefail
+          found=0
+          for f in $(git ls-files '*.yml' '*.yaml'); do
+            found=1
+            echo "::group::yamllint $f"
+            python - <<'PY'
+import sys, yaml, pathlib
+p = pathlib.Path(sys.argv[1])
+with p.open('r', encoding='utf-8') as fh:
+    yaml.safe_load(fh)
+print(f"OK: {p}")
+PY
+            echo "::endgroup::"
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "No YAML files to validate."
+          fi
+        shell: bash
+
+  python-install:
+    name: Optional Python install
+    runs-on: ubuntu-latest
+    needs: [lint-and-validate]
+    if: ${{ inputs.python_requirements_path != '' }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install requirements (if file exists)
+        run: |
+          set -euo pipefail
+          REQ="${{ inputs.python_requirements_path }}"
+          if [ -f "$REQ" ]; then
+            echo "Installing: $REQ"
+            pip install -r "$REQ"
+            echo "Installed OK."
+          else
+            echo "::warning::Requirements file not found: $REQ (skipping)"
+          fi
+
+      - name: Run optional tests
+        if: ${{ inputs.test_command != '' }}
+        run: |
+          set -euo pipefail
+          echo "Running: ${{ inputs.test_command }}"
+          bash -lc "${{ inputs.test_command }}"
+
+  docker-build:
+    name: Optional Docker build (no push)
+    runs-on: ubuntu-latest
+    needs: [lint-and-validate]
+    if: ${{ inputs.docker_context != '' }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image (dry; local only)
+        run: |
+          set -euo pipefail
+          CTX="${{ inputs.docker_context }}"
+          DF="${{ inputs.dockerfile }}"
+          TAG="ci-auto-doctor:build-${{ github.run_id }}"
+          if [ -d "$CTX" ]; then
+            echo "Building Docker image from context: $CTX, dockerfile: $DF"
+            docker build -t "$TAG" -f "$DF" "$CTX"
+            echo "Local build OK: $TAG"
+          else
+            echo "::warning::Docker context not found: $CTX (skipping)"
+          fi
