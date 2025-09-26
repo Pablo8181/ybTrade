@@ -1,0 +1,62 @@
+name: _sheet_ping
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Google libs
+        run: pip install google-api-python-client==2.147.0 google-auth==2.35.0 google-auth-httplib2==0.2.0
+
+      - name: Auth to GCP (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Ping write to Google Sheet
+        env:
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+        run: |
+          python - <<'PY'
+          import os, datetime
+          from google.auth import default
+          from googleapiclient.discovery import build
+          from google.auth.transport.requests import Request
+          sheet_id = os.environ["SHEET_ID"]
+          creds,_ = default(scopes=["https://www.googleapis.com/auth/spreadsheets"])
+          if not creds.valid: creds.refresh(Request())
+          svc = build("sheets","v4",credentials=creds, cache_discovery=False)
+          tab = "connectivity"
+          # ensure sheet/tab
+          meta = svc.spreadsheets().get(spreadsheetId=sheet_id).execute()
+          titles = {s["properties"]["title"] for s in meta.get("sheets",[])}
+          if tab not in titles:
+              svc.spreadsheets().batchUpdate(
+                  spreadsheetId=sheet_id,
+                  body={"requests":[{"addSheet":{"properties":{"title":tab}}}]}
+              ).execute()
+          # write ping row
+          now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+          body = {"values":[["ping", now, "OK"]]}
+          svc.spreadsheets().values().append(
+              spreadsheetId=sheet_id,
+              range=f"{tab}!A1",
+              valueInputOption="RAW",
+              insertDataOption="INSERT_ROWS",
+              body=body,
+          ).execute()
+          print("wrote connectivity ping")
+          PY
