@@ -20,6 +20,47 @@ jobs:
           [ $ok -eq 1 ] || exit 1
           echo "All required secrets present."
 
+      - name: "Preflight: Drive + Sheets R/W"
+        env:
+          SHEET_ID: "1ul8tfDIXprOAOEgvx0QvteYIpVK0p1TBAC9v5TMSaP8"
+        run: |
+          python - <<'PY'
+          import os, sys, re
+          from datetime import datetime, timezone
+          from google.auth import default as adc
+          from google.auth.transport.requests import Request
+          from googleapiclient.discovery import build
+
+          sid = os.environ["SHEET_ID"].strip()
+          print("Using SHEET_ID:", sid)
+
+          scopes = [
+              "https://www.googleapis.com/auth/spreadsheets",
+              "https://www.googleapis.com/auth/drive.readonly",
+          ]
+          creds, _ = adc(scopes=scopes)
+          if not creds.valid:
+              creds.refresh(Request())
+          print("Service account:", getattr(creds, "service_account_email", "<unknown>"))
+
+          drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+          meta = drive.files().get(fileId=sid, fields="id,name").execute()
+          print("Drive READ OK. File:", meta.get("name"))
+
+          sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
+          vals = sheets.spreadsheets().values().get(spreadsheetId=sid, range="A1:Z1").execute()
+          print("Sheets READ OK. A1:Z1 ->", vals.get("values"))
+
+          ts = datetime.now(timezone.utc).isoformat()
+          sheets.spreadsheets().values().update(
+              spreadsheetId=sid,
+              range="Z1",
+              valueInputOption="RAW",
+              body={"values": [[f"preflight ok {ts}"]]},
+          ).execute()
+          print("Sheets WRITE OK -> Z1")
+          PY
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
