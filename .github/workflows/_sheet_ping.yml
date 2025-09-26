@@ -16,50 +16,10 @@ jobs:
           [ -n "${{ secrets.WIF_PROVIDER }}" ]        || { echo "::error::Missing secret: WIF_PROVIDER"; ok=0; }
           [ -n "${{ secrets.WIF_SERVICE_ACCOUNT }}" ] || { echo "::error::Missing secret: WIF_SERVICE_ACCOUNT"; ok=0; }
           [ -n "${{ secrets.GCP_PROJECT }}" ]         || { echo "::error::Missing secret: GCP_PROJECT"; ok=0; }
+          # You can hardcode the ID for quick tests, but preferably keep it as a secret
           [ -n "${{ secrets.SHEET_ID }}" ]            || { echo "::error::Missing secret: SHEET_ID"; ok=0; }
           [ $ok -eq 1 ] || exit 1
           echo "All required secrets present."
-
-      - name: "Preflight: Drive + Sheets R/W"
-        env:
-          SHEET_ID: "1ul8tfDIXprOAOEgvx0QvteYIpVK0p1TBAC9v5TMSaP8"
-        run: |
-          python - <<'PY'
-          import os, sys, re
-          from datetime import datetime, timezone
-          from google.auth import default as adc
-          from google.auth.transport.requests import Request
-          from googleapiclient.discovery import build
-
-          sid = os.environ["SHEET_ID"].strip()
-          print("Using SHEET_ID:", sid)
-
-          scopes = [
-              "https://www.googleapis.com/auth/spreadsheets",
-              "https://www.googleapis.com/auth/drive.readonly",
-          ]
-          creds, _ = adc(scopes=scopes)
-          if not creds.valid:
-              creds.refresh(Request())
-          print("Service account:", getattr(creds, "service_account_email", "<unknown>"))
-
-          drive = build("drive", "v3", credentials=creds, cache_discovery=False)
-          meta = drive.files().get(fileId=sid, fields="id,name").execute()
-          print("Drive READ OK. File:", meta.get("name"))
-
-          sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
-          vals = sheets.spreadsheets().values().get(spreadsheetId=sid, range="A1:Z1").execute()
-          print("Sheets READ OK. A1:Z1 ->", vals.get("values"))
-
-          ts = datetime.now(timezone.utc).isoformat()
-          sheets.spreadsheets().values().update(
-              spreadsheetId=sid,
-              range="Z1",
-              valueInputOption="RAW",
-              body={"values": [[f"preflight ok {ts}"]]},
-          ).execute()
-          print("Sheets WRITE OK -> Z1")
-          PY
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -69,7 +29,11 @@ jobs:
       - name: Install Google client libs
         run: |
           python -m pip install --upgrade pip
-          python -m pip install google-api-python-client==2.147.0 google-auth==2.35.0 google-auth-httplib2==0.2.0 google-auth-oauthlib==1.2.1
+          python -m pip install \
+            google-api-python-client==2.147.0 \
+            google-auth==2.35.0 \
+            google-auth-httplib2==0.2.0 \
+            google-auth-oauthlib==1.2.1
 
       - name: Auth to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
@@ -77,19 +41,36 @@ jobs:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
           create_credentials_file: true
+          token_format: access_token  # ADC-compatible
 
-      - name: "Preflight: Drive + Sheets R/W"
+      - name: Preflight: Drive + Sheets R/W with diagnostics
         env:
           SHEET_ID: ${{ secrets.SHEET_ID }}
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+          WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
         run: |
           python - <<'PY'
-          import os
+          import os, json, re, sys
           from datetime import datetime, timezone
+          from googleapiclient.discovery import build
+          from googleapiclient.errors import HttpError
           from google.auth import default as adc
           from google.auth.transport.requests import Request
-          from googleapiclient.discovery import build
 
-          sid = os.environ["SHEET_ID"]
+          def log(k, v):
+              print(f"[diag] {k}: {v}")
+
+          sid = os.environ.get("SHEET_ID", "").strip()
+          if not sid:
+              print("::error::SHEET_ID is empty")
+              sys.exit(1)
+
+          # Quick format check (helps catch pasting the full URL)
+          if "/" in sid or sid.startswith("http"):
+              print("::warning::SHEET_ID looks like a URL. Use ONLY the raw ID between /d/ and /edit.")
+          if not re.match(r"^[A-Za-z0-9_\-]{30,}$", sid):
+              print(f"::warning::SHEET_ID format unusual: '{sid[:6]}...'. Make sure it is the long token between /d/ and /edit.")
+
           scopes = [
               "https://www.googleapis.com/auth/spreadsheets",
               "https://www.googleapis.com/auth/drive.readonly",
@@ -98,22 +79,83 @@ jobs:
           if not creds.valid:
               creds.refresh(Request())
 
-          print("Service account:", getattr(creds, "service_account_email", "<unknown>"))
+          acct = getattr(creds, "service_account_email", "<unknown>")
+          log("Service account (ADC)", acct)
+          log("Project (env)", os.environ.get("GCP_PROJECT", "<unset>"))
+          log("Target Sheet ID", sid)
 
-          drive = build("drive", "v3", credentials=creds, cache_discovery=False)
-          meta = drive.files().get(fileId=sid, fields="id,name").execute()
-          print("Drive READ OK. File:", meta["name"])
+          # 1) DRIVE: verify the file exists and we can see its name
+          try:
+              drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+              meta = drive.files().get(fileId=sid, fields="id,name,owners(emailAddress),permissions(emailAddress,role)").execute()
+              log("Drive file name", meta.get("name"))
+              owners = ",".join([o.get("emailAddress","?") for o in meta.get("owners",[])])
+              log("Drive owners", owners or "<unknown>")
+          except HttpError as e:
+              # Helpful decoding
+              status = getattr(e, "resp", {}).status if hasattr(e, "resp") else "?"
+              try:
+                  payload = json.loads(e.content.decode("utf-8"))
+              except Exception:
+                  payload = {}
+              reason = ""
+              if isinstance(payload, dict):
+                  err = payload.get("error", {})
+                  reason = f"{err.get('code')} {err.get('message')}"
+              print(f"::error::Drive API error ({status}): {reason or e}")
+              if status == 404:
+                  print("HINT: 404 means the ID is wrong or the file is not in the same Google domain / not shared.")
+              if status == 403:
+                  print("HINT: 403 means the service account has no access. Share the Sheet with the service account as Editor.")
+              sys.exit(1)
 
-          sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
-          vals = sheets.spreadsheets().values().get(spreadsheetId=sid, range="A1:Z1").execute()
-          print("Sheets READ OK. A1:Z1 ->", vals.get("values"))
+          # 2) SHEETS: read a small range
+          try:
+              sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
+              vals = sheets.spreadsheets().values().get(spreadsheetId=sid, range="A1:Z1").execute()
+              log("Sheets read A1:Z1", vals.get("values"))
+          except HttpError as e:
+              status = getattr(e, "resp", {}).status if hasattr(e, "resp") else "?"
+              try:
+                  payload = json.loads(e.content.decode("utf-8"))
+              except Exception:
+                  payload = {}
+              reason = ""
+              if isinstance(payload, dict):
+                  err = payload.get("error", {})
+                  reason = f"{err.get('code')} {err.get('message')}"
+              print(f"::error::Sheets READ error ({status}): {reason or e}")
+              if status == 403:
+                  print("HINT: Share the Sheet with the service account (Editor).")
+              if status == 404:
+                  print("HINT: Double-check the Sheet ID.")
+              sys.exit(1)
 
-          ts = datetime.now(timezone.utc).isoformat()
-          sheets.spreadsheets().values().update(
-              spreadsheetId=sid,
-              range="Z1",
-              valueInputOption="RAW",
-              body={"values": [[f"preflight ok {ts}"]]},
-          ).execute()
-          print("Sheets WRITE OK -> Z1")
+          # 3) SHEETS: write to Z1 to prove write permission
+          try:
+              ts = datetime.now(timezone.utc).isoformat()
+              body = {"values": [[f"preflight ok {ts}"]]}
+              sheets.spreadsheets().values().update(
+                  spreadsheetId=sid,
+                  range="Z1",
+                  valueInputOption="RAW",
+                  body=body,
+              ).execute()
+              log("Sheets write Z1", "OK")
+          except HttpError as e:
+              status = getattr(e, "resp", {}).status if hasattr(e, "resp") else "?"
+              try:
+                  payload = json.loads(e.content.decode("utf-8"))
+              except Exception:
+                  payload = {}
+              reason = ""
+              if isinstance(payload, dict):
+                  err = payload.get("error", {})
+                  reason = f"{err.get('code')} {err.get('message')}"
+              print(f"::error::Sheets WRITE error ({status}): {reason or e}")
+              if status == 403:
+                  print("HINT: Ensure the service account is an Editor on the Sheet (not just Viewer).")
+              sys.exit(1)
+
+          print("✅ Preflight succeeded: Drive read + Sheets read/write all good.")
           PY
