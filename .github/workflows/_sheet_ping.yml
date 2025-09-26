@@ -36,9 +36,8 @@ jobs:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
           create_credentials_file: true
-          token_format: access_token
 
-      - name: Preflight: Drive + Sheets R/W
+      - name: "Preflight: Drive + Sheets R/W"
         env:
           SHEET_ID: ${{ secrets.SHEET_ID }}
         run: |
@@ -62,7 +61,7 @@ jobs:
 
           drive = build("drive", "v3", credentials=creds, cache_discovery=False)
           meta = drive.files().get(fileId=sid, fields="id,name").execute()
-          print("Drive OK. File:", meta["name"])
+          print("Drive READ OK. File:", meta["name"])
 
           sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
           vals = sheets.spreadsheets().values().get(spreadsheetId=sid, range="A1:Z1").execute()
