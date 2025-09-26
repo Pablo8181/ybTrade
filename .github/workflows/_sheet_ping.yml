@@ -1,62 +1,83 @@
 name: _sheet_ping
-
 on:
-  workflow_dispatch: {}
-
-permissions:
-  id-token: write
-  contents: read
+  workflow_dispatch:
 
 jobs:
   ping:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    permissions:
+      id-token: write     # needed for Workload Identity Federation
+      contents: read
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Sanity-check required secrets
+        run: |
+          ok=1
+          [ -n "${{ secrets.WIF_PROVIDER }}" ]        || { echo "::error::Missing secret: WIF_PROVIDER"; ok=0; }
+          [ -n "${{ secrets.WIF_SERVICE_ACCOUNT }}" ] || { echo "::error::Missing secret: WIF_SERVICE_ACCOUNT"; ok=0; }
+          [ -n "${{ secrets.GCP_PROJECT }}" ]         || { echo "::error::Missing secret: GCP_PROJECT"; ok=0; }
+          [ -n "${{ secrets.SHEET_ID }}" ]            || { echo "::error::Missing secret: SHEET_ID"; ok=0; }
+          [ $ok -eq 1 ] || exit 1
+          echo "All required secrets present."
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install Google libs
-        run: pip install google-api-python-client==2.147.0 google-auth==2.35.0 google-auth-httplib2==0.2.0
+      - name: Install Google client libs
+        run: |
+          pip install --upgrade pip
+          pip install google-api-python-client==2.147.0 google-auth==2.35.0 google-auth-httplib2==0.2.0 google-auth-oauthlib==1.2.1
 
-      - name: Auth to GCP (WIF)
+      - name: Auth to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+          token_format: access_token
 
-      - name: Ping write to Google Sheet
+      - name: Preflight: whoami + Drive/Sheets R/W
         env:
           SHEET_ID: ${{ secrets.SHEET_ID }}
         run: |
           python - <<'PY'
-          import os, datetime
-          from google.auth import default
-          from googleapiclient.discovery import build
+          import os
+          from datetime import datetime, timezone
+          from google.auth import default as adc
           from google.auth.transport.requests import Request
-          sheet_id = os.environ["SHEET_ID"]
-          creds,_ = default(scopes=["https://www.googleapis.com/auth/spreadsheets"])
-          if not creds.valid: creds.refresh(Request())
-          svc = build("sheets","v4",credentials=creds, cache_discovery=False)
-          tab = "connectivity"
-          # ensure sheet/tab
-          meta = svc.spreadsheets().get(spreadsheetId=sheet_id).execute()
-          titles = {s["properties"]["title"] for s in meta.get("sheets",[])}
-          if tab not in titles:
-              svc.spreadsheets().batchUpdate(
-                  spreadsheetId=sheet_id,
-                  body={"requests":[{"addSheet":{"properties":{"title":tab}}}]}
-              ).execute()
-          # write ping row
-          now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
-          body = {"values":[["ping", now, "OK"]]}
-          svc.spreadsheets().values().append(
-              spreadsheetId=sheet_id,
-              range=f"{tab}!A1",
-              valueInputOption="RAW",
-              insertDataOption="INSERT_ROWS",
-              body=body,
+          from googleapiclient.discovery import build
+
+          sid = os.environ["SHEET_ID"]
+          scopes = [
+              "https://www.googleapis.com/auth/spreadsheets",
+              "https://www.googleapis.com/auth/drive.readonly",
+          ]
+          creds, _ = adc(scopes=scopes)
+          if not creds.valid:
+              creds.refresh(Request())
+
+          print("Service account:", getattr(creds, "service_account_email", "<unknown>"))
+
+          # Drive: confirm file visible
+          drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+          meta = drive.files().get(fileId=sid, fields="id,name").execute()
+          print("Drive OK. File:", meta["name"])
+
+          # Sheets: read header + write a timestamp to Z1
+          sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
+          vals = sheets.spreadsheets().values().get(
+              spreadsheetId=sid, range="A1:Z1"
           ).execute()
-          print("wrote connectivity ping")
+          print("Sheets READ OK. A1:Z1 ->", vals.get("values"))
+
+          ts = datetime.now(timezone.utc).isoformat()
+          sheets.spreadsheets().values().update(
+              spreadsheetId=sid,
+              range="Z1",
+              valueInputOption="RAW",
+              body={"values": [[f"preflight ok {ts}"]]},
+          ).execute()
+          print("Sheets WRITE OK -> Z1")
           PY
