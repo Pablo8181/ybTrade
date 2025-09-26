@@ -6,7 +6,7 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write     # needed for Workload Identity Federation
+      id-token: write
       contents: read
 
     steps:
@@ -27,8 +27,8 @@ jobs:
 
       - name: Install Google client libs
         run: |
-          pip install --upgrade pip
-          pip install google-api-python-client==2.147.0 google-auth==2.35.0 google-auth-httplib2==0.2.0 google-auth-oauthlib==1.2.1
+          python -m pip install --upgrade pip
+          python -m pip install google-api-python-client==2.147.0 google-auth==2.35.0 google-auth-httplib2==0.2.0 google-auth-oauthlib==1.2.1
 
       - name: Auth to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
@@ -38,7 +38,7 @@ jobs:
           create_credentials_file: true
           token_format: access_token
 
-      - name: Preflight: whoami + Drive/Sheets R/W
+      - name: Preflight: Drive + Sheets R/W
         env:
           SHEET_ID: ${{ secrets.SHEET_ID }}
         run: |
@@ -60,16 +60,12 @@ jobs:
 
           print("Service account:", getattr(creds, "service_account_email", "<unknown>"))
 
-          # Drive: confirm file visible
           drive = build("drive", "v3", credentials=creds, cache_discovery=False)
           meta = drive.files().get(fileId=sid, fields="id,name").execute()
           print("Drive OK. File:", meta["name"])
 
-          # Sheets: read header + write a timestamp to Z1
           sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
-          vals = sheets.spreadsheets().values().get(
-              spreadsheetId=sid, range="A1:Z1"
-          ).execute()
+          vals = sheets.spreadsheets().values().get(spreadsheetId=sid, range="A1:Z1").execute()
           print("Sheets READ OK. A1:Z1 ->", vals.get("values"))
 
           ts = datetime.now(timezone.utc).isoformat()
