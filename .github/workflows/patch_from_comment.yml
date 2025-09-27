@@ -2,105 +2,88 @@ name: Patch-from-comment
 
 on:
   issue_comment:
-    types: [created, edited]
+    types: [created]
 
 permissions:
   contents: write
   pull-requests: write
 
 jobs:
-  apply-patch:
-    name: Apply patch from PR comment
+  apply:
+    # Only run on comments on PRs that contain "/patch"
+    if: ${{ github.event.issue.pull_request && contains(github.event.comment.body, '/patch') }}
     runs-on: ubuntu-latest
-    if: >
-      github.event.issue.pull_request != null &&
-      contains(github.event.comment.body, '/patch')
     steps:
-      - name: Extract PR metadata
-        id: meta
-        run: |
-          set -euo pipefail
-          echo "pr_number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
-          echo "comment_author=${{ github.event.comment.user.login }}" >> "$GITHUB_OUTPUT"
+      - name: Get PR head info
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const pull_number = context.payload.issue.number;
+            const {data: pr} = await github.rest.pulls.get({owner, repo, pull_number});
+            core.setOutput('head_repo', pr.head.repo.full_name);
+            core.setOutput('head_ref', pr.head.ref);
 
-      - name: Check out PR head
+      - name: Checkout PR head
         uses: actions/checkout@v4
         with:
-          # Fetch the PR HEAD so we can commit back to it
-          ref: refs/pull/${{ steps.meta.outputs.pr_number }}/head
-          fetch-depth: 0
+          repository: ${{ steps.pr.outputs.head_repo }}
+          ref: ${{ steps.pr.outputs.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract first ```diff or ```patch block to patch.diff
-        id: grab
+      - name: Extract fenced patch
+        id: extract
+        uses: actions/github-script@v7
+        with:
+          result-encoding: string
+          script: |
+            const body = context.payload.comment.body || '';
+            const m = body.match(/```(?:patch|diff)?\s*([\s\S]*?)```/i);
+            if (!m) {
+              core.setFailed('No fenced ```patch``` or ```diff``` block found in the comment.');
+              return;
+            }
+            return m[1];
+
+      - name: Write patch file
         run: |
           set -euo pipefail
-          python - <<'PY'
-import os, re, sys, textwrap, json
-body = os.environ["BODY"]
-# Find the first fenced code block labeled diff or patch
-m = re.search(r"```(?:diff|patch)\s+([\s\S]*?)```", body, re.IGNORECASE)
-if not m:
-    print("::error::No ```diff or ```patch block found in the comment.")
-    sys.exit(1)
-patch = m.group(1).strip() + "\n"
-open("patch.diff","w", encoding="utf-8").write(patch)
-print("patch diff extracted to patch.diff:")
-print("\n".join(patch.splitlines()[:40]))
-PY
-        env:
-          BODY: ${{ github.event.comment.body }}
+          printf "%s" "${{ steps.extract.outputs.result }}" > /tmp/patch.diff
+          echo "----- PATCH PREVIEW (first 120 lines) -----"
+          sed -n '1,120p' /tmp/patch.diff || true
+          echo "------------------------------------------"
 
-      - name: Configure git author
+      - name: Apply patch & push
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Create branch for patch
-        id: branch
-        run: |
-          set -euo pipefail
-          BR="chore/patch-${{ github.run_id }}"
-          git checkout -b "$BR"
-          echo "name=$BR" >> "$GITHUB_OUTPUT"
-
-      - name: Try apply patch (p0 then p1)
-        id: apply
-        run: |
-          set -euo pipefail
-          set +e
-          git apply -p0 --index --verbose patch.diff
-          R=$?
-          if [ $R -ne 0 ]; then
-            echo "::warning::-p0 failed; trying -p1"
-            git reset --hard
-            git apply -p1 --index --verbose patch.diff
-            R=$?
-          fi
-          if [ $R -ne 0 ]; then
-            echo "::error::Failed to apply patch with -p0 and -p1."
-            exit 1
-          fi
-          set -e
-          echo "Patch applied to index."
-
-      - name: Commit & push
-        run: |
-          set -euo pipefail
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git apply -p0 --whitespace=fix -v /tmp/patch.diff
           git add -A
-          git commit -m "Apply patch from comment by @${{ steps.meta.outputs.comment_author }} (#${{ steps.meta.outputs.pr_number }})"
-          git push origin "HEAD:${{ steps.branch.outputs.name }}"
+          git commit -m "Apply /patch from comment $GITHUB_RUN_ID"
+          git push origin HEAD
 
-      - name: Update PR (set new head or open suggestion)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # Try to push directly to the PR's source branch if we can detect it
-          # Otherwise leave as separate branch and post a pointer comment.
-          PR=${{ steps.meta.outputs.pr_number }}
-          HEAD_REF=$(gh pr view "$PR" --json headRefName -q .headRefName)
-          REMOTE_URL=$(git config --get remote.origin.url)
-          echo "PR head ref: $HEAD_REF"
-          echo "New branch:  ${{ steps.branch.outputs.name }}"
-          # If HEAD_REF is in same repo, open a PR from branch to HEAD_REF, else just comment
-          gh pr comment "$PR" --body "✅ Applied patch from comment by @${{ steps.meta.outputs.comment_author }} to branch \`${{ steps.branch.outputs.name }}\`. You can merge or cherry-pick from it."
+      - name: Comment success
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const issue_number = context.payload.issue.number;
+            await github.rest.issues.createComment({
+              owner, repo, issue_number,
+              body: "✅ Patch applied and pushed. (run #" + process.env.GITHUB_RUN_ID + ")"
+            });
+
+      - name: Comment failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const issue_number = context.payload.issue.number;
+            await github.rest.issues.createComment({
+              owner, repo, issue_number,
+              body: "❌ Failed to apply patch. See logs. (run #" + process.env.GITHUB_RUN_ID + ")"
+            });
