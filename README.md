@@ -10,6 +10,24 @@ Option-C (Now)                  Threshold Gatekeeper                  Option-A (
 └────────────────────────┘      └────────────────────────────┘      └────────────────────────────┘
 ```
 
+## Architecture: Ingest → Transform → Publish
+
+```
+[Exchanges / Vendors] ──▶ [a_ingest/a01_ingest_klines] ──▶ [Bronze: raw_klines_daily]
+                                │
+                                ▼
+                            [a_transform/t02_features_spot1d] ──▶ [Silver: ohlcv_daily]
+                                │
+                                ▼
+                            [a_publish/p01_export_spot1d] ──▶ [Gold: features_spot1d → Sheets]
+```
+
+- **Ingest** (`a_ingest/a01_ingest_klines/`): pull daily OHLCV klines per provider and land them in BigQuery Bronze via the shared `lib/py/` helpers.
+- **Transform** (`a_transform/t02_features_spot1d/`): curate validated OHLCV + compute indicators with `lib/py/indicators.py` stubs before landing Silver/Gold tables.
+- **Publish** (`a_publish/p01_export_spot1d/`): export Gold features into deterministic Google Sheets tabs using `lib/py/sheets.py` once populated.
+- **Bootstrap BigQuery**: run **Actions → _bq_bootstrap → Run workflow** to create/upgrade datasets using `tools/bq/bootstrap.sql` (requires `WIF_PROVIDER`, `WIF_SERVICE_ACCOUNT`, `GCP_PROJECT`).
+- **Local smoke checks**: execute `python tools/verify/test_lib_stubs.py` to confirm shared helper stubs remain documented while implementation is in-flight.
+
 ## Quickstart
 1. **Trigger CI/CD**
    - Push to the `dev` branch or run the `CI Deploy` workflow manually (Actions → CI Deploy → _Run workflow_).
