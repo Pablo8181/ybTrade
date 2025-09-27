@@ -111,6 +111,14 @@ jobs:
         run: |
           gcloud run jobs execute a01-bsp-pulldaily-sheet-full --region "$REGION" --wait
 
+      - name: Print Console execution URL
+        env:
+          REGION: ${{ secrets.GCP_REGION }}
+          PROJECT: ${{ secrets.GCP_PROJECT }}
+        run: |
+          JOB_NAME="a01-bsp-pulldaily-sheet-full"
+          echo "Job executions: https://console.cloud.google.com/run/jobs/details/${REGION}/${JOB_NAME}/executions?project=${PROJECT}"
+
       - name: Comment PR (if any)
         if: ${{ github.event.pull_request.number }}
         env:

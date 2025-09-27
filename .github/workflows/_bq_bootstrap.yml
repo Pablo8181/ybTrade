@@ -1,4 +1,4 @@
-name: BigQuery Bootstrap
+name: "_bq_bootstrap"
 
 on:
   workflow_dispatch:
@@ -7,106 +7,66 @@ permissions:
   contents: read
   id-token: write
 
+env:
+  GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+  GCP_REGION: ${{ secrets.GCP_REGION }}
+
 jobs:
   bootstrap:
+    name: "Create/upgrade BigQuery datasets & tables"
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Auth to Google Cloud (WIF)
+      - name: Auth to Google Cloud (OIDC/WIF)
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-          create_credentials_file: true
 
-      - name: Install BigQuery client
+      - name: Setup gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          version: ">= 460.0.0"
+
+      - name: Set project
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install "google-cloud-bigquery>=3.25.0"
+          gcloud config set project "${GCP_PROJECT}"
+          gcloud info
 
-      - name: Bootstrap dataset and tables
-        env:
-          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
-          # Optional: override BQ location (defaults to EU if not set)
-          BQ_LOCATION: EU
+      - name: Apply bootstrap DDL
         run: |
           set -euo pipefail
-          python - <<'PY'
-          import os, sys
-          from pathlib import Path
-          from google.cloud import bigquery
+          echo "Running tools/bq/bootstrap.sql against project=${GCP_PROJECT}"
+          bq --project_id="${GCP_PROJECT}" query --use_legacy_sql=false < tools/bq/bootstrap.sql
 
-          project = os.getenv("GCP_PROJECT", "").strip()
-          if not project:
-            print("::error::Missing GCP_PROJECT secret")
-            sys.exit(1)
+      - name: Verify dataset exists
+        run: |
+          set -euo pipefail
+          if bq --project_id="${GCP_PROJECT}" ls -d | grep -q "^ *trading *$"; then
+            ts=$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')
+            echo "$ts [INFO] [verify] step=bq_dataset ok=true dataset=trading"
+          else
+            ts=$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')
+            echo "$ts [ERROR] [verify] step=bq_dataset ok=false reason=\"dataset trading not found\""
+            exit 1
+          fi
 
-          location = os.getenv("BQ_LOCATION", "EU").strip() or "EU"
-          sql_path = Path("tools/bq/bootstrap.sql")
-
-          if sql_path.exists():
-            raw = sql_path.read_text(encoding="utf-8")
-            ddl = raw.replace("{{PROJECT}}", project).replace("{{LOCATION}}", location)
-            print(f"[bootstrap] Using SQL from {sql_path}")
-          else:
-            print(f"[bootstrap] {sql_path} not found, using default DDL")
-            ddl = f"""
-            -- Create dataset (schema) if missing
-            CREATE SCHEMA IF NOT EXISTS `{project}.ybtrade`
-            OPTIONS (location="{location}");
-
-            -- Bronze: raw OHLCV (daily)
-            CREATE TABLE IF NOT EXISTS `{project}.ybtrade.bronze_ohlcv_daily` (
-              date        DATE,
-              symbol      STRING,
-              open        FLOAT64,
-              high        FLOAT64,
-              low         FLOAT64,
-              close       FLOAT64,
-              volume      FLOAT64,
-              qav         FLOAT64,
-              ntr         INT64,
-              tbb         FLOAT64,
-              tbq         FLOAT64,
-              open_ms     INT64,
-              close_ms    INT64,
-              provider    STRING,
-              load_ts     TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
-            );
-
-            -- Silver: features (placeholder, extend later)
-            CREATE TABLE IF NOT EXISTS `{project}.ybtrade.silver_features_daily` (
-              date        DATE,
-              symbol      STRING,
-              -- add feature columns later
-              load_ts     TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
-            );
-
-            -- Gold: publish to Sheets (placeholder, extend later)
-            CREATE TABLE IF NOT EXISTS `{project}.ybtrade.gold_publish_spot1d` (
-              date        DATE,
-              symbol      STRING,
-              -- align columns to Sheet export later
-              load_ts     TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
-            );
-            """
-
-          # Split on semicolons, but tolerate whitespace/blank lines
-          statements = [s.strip() for s in ddl.split(";") if s.strip()]
-          client = bigquery.Client(project=project, location=location)
-
-          for stmt in statements:
-            # Show first line for clarity in logs
-            first = stmt.splitlines()[0][:180]
-            print(f"[bootstrap] Executing: {first} ...")
-            job = client.query(stmt)
-            job.result()
-          print("[bootstrap] Completed successfully.")
-          PY
+      - name: Verify required tables exist
+        run: |
+          set -euo pipefail
+          MISSING=0
+          for T in ohlcv_1d features_1d; do
+            if ! bq --project_id="${GCP_PROJECT}" ls trading | awk '{print $1}' | grep -qx "$T"; then
+              echo "[ERROR] missing table: $T"; MISSING=1
+            fi
+          done
+          ts=$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')
+          if [ "$MISSING" -eq 0 ]; then
+            echo "$ts [INFO] [verify] step=bq_tables ok=true tables=ohlcv_1d,features_1d"
+          else
+            echo "$ts [ERROR] [verify] step=bq_tables ok=false"
+            exit 1
+          fi
