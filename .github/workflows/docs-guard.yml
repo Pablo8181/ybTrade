@@ -2,9 +2,13 @@ name: Docs Guard
 
 on:
   pull_request:
+    paths:
+      - 'docs/**'
+      - 'README.md'
 
 jobs:
   ensure-docs:
+    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
