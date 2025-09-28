@@ -1,4 +1,4 @@
-name: "_bq_bootstrap"
+name: Create/upgrade BigQuery datasets & tables
 
 on:
   workflow_dispatch:
@@ -8,65 +8,51 @@ permissions:
   id-token: write
 
 env:
+  # Standardize on US; can be overridden via repo/org variable BQ_LOCATION (e.g., EU or europe-*)
   GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
-  GCP_REGION: ${{ secrets.GCP_REGION }}
+  BQ_LOCATION: ${{ vars.BQ_LOCATION || 'US' }}
 
 jobs:
   bootstrap:
-    name: "Create/upgrade BigQuery datasets & tables"
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Auth to Google Cloud (OIDC/WIF)
+      - name: Auth to Google Cloud (WIF/OIDC)
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          export_default_credentials: true
 
       - name: Setup gcloud SDK
         uses: google-github-actions/setup-gcloud@v2
-        with:
-          version: ">= 460.0.0"
 
-      - name: Set project
-        run: |
-          gcloud config set project "${GCP_PROJECT}"
-          gcloud info
+      - name: Make scripts executable
+        run: chmod +x tools/bq/a01_bq_bootstrap_run.sh tools/verify/a01_verify_bq_location.sh
+        shell: bash
 
-      - name: Apply bootstrap DDL
-        run: |
-          set -euo pipefail
-          echo "Running tools/bq/bootstrap.sql against project=${GCP_PROJECT}"
-          bq --project_id="${GCP_PROJECT}" query --use_legacy_sql=false < tools/bq/bootstrap.sql
+      - name: Configure bq defaults (.bigqueryrc → US)
+        run: cp .bigqueryrc "$GITHUB_WORKSPACE/.bigqueryrc"
+        shell: bash
 
-      - name: Verify dataset exists
-        run: |
-          set -euo pipefail
-          if bq --project_id="${GCP_PROJECT}" ls -d | grep -q "^ *trading *$"; then
-            ts=$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')
-            echo "$ts [INFO] [verify] step=bq_dataset ok=true dataset=trading"
-          else
-            ts=$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')
-            echo "$ts [ERROR] [verify] step=bq_dataset ok=false reason=\"dataset trading not found\""
-            exit 1
-          fi
-
-      - name: Verify required tables exist
+      - name: Run bootstrap (location-normalized)
+        env:
+          PROJECT_ID: ${{ env.GCP_PROJECT }}
+          BQ_LOCATION: ${{ env.BQ_LOCATION }}
+          BIGQUERYRC: ${{ github.workspace }}/.bigqueryrc
         run: |
           set -euo pipefail
-          MISSING=0
-          for T in ohlcv_1d features_1d; do
-            if ! bq --project_id="${GCP_PROJECT}" ls trading | awk '{print $1}' | grep -qx "$T"; then
-              echo "[ERROR] missing table: $T"; MISSING=1
-            fi
-          done
-          ts=$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')
-          if [ "$MISSING" -eq 0 ]; then
-            echo "$ts [INFO] [verify] step=bq_tables ok=true tables=ohlcv_1d,features_1d"
-          else
-            echo "$ts [ERROR] [verify] step=bq_tables ok=false"
-            exit 1
-          fi
+          : "${PROJECT_ID:?missing}"
+          bash tools/bq/a01_bq_bootstrap_run.sh
+        shell: bash
+
+      - name: Verify job location
+        env:
+          PROJECT_ID: ${{ env.GCP_PROJECT }}
+          BQ_LOCATION: ${{ env.BQ_LOCATION }}
+          BIGQUERYRC: ${{ github.workspace }}/.bigqueryrc
+        run: bash tools/verify/a01_verify_bq_location.sh
+        shell: bash
+
