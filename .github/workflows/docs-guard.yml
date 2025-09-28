@@ -1,0 +1,39 @@
+name: Docs Guard
+
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'README.md'
+  workflow_dispatch:
+
+jobs:
+  ensure-docs:
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Enforce documentation updates
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          NEEDS_DOCS=0
+          DOCS_UPDATED=0
+          for FILE in $CHANGED_FILES; do
+            if echo "$FILE" | grep -Eq '^(a_apps/|openbb/|freqtrade/|infra/|\.github/workflows/)'; then
+              NEEDS_DOCS=1
+            fi
+            if echo "$FILE" | grep -Eq '^(README\.md|docs/MASTER_BRIEF\.md|docs/DECISIONS\.md|docs/CHANGELOG\.md)$'; then
+              DOCS_UPDATED=1
+            fi
+          done
+          if [ "$NEEDS_DOCS" -eq 1 ] && [ "$DOCS_UPDATED" -eq 0 ]; then
+            echo "Docs update required"
+            echo "$CHANGED_FILES"
+            exit 1
+          fi
+          echo "Docs check passed"

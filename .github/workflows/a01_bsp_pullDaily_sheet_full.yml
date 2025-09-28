@@ -1,0 +1,128 @@
+name: a01_bsp_pulldaily_sheet_full
+
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Backfill since (YYYY-MM-DD)"
+        required: false
+        default: "2017-01-01"
+      provider:
+        description: "binance | openbb"
+        required: false
+        default: "binance"
+      symbol:
+        description: "Symbol (e.g., BTCUSDT)"
+        required: false
+        default: "BTCUSDT"
+      write_mode:
+        description: "replace | append"
+        required: false
+        default: "replace"
+
+jobs:
+  build-deploy-run:
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r a_apps/a01_bsp_pullDaily_sheet_full/requirements.txt
+
+      - name: Auth to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT }}
+
+      - name: Build & push image
+        env:
+          REGION: ${{ secrets.GCP_REGION }}
+          PROJ:   ${{ secrets.GCP_PROJECT }}
+        run: |
+          set -euo pipefail
+          REPO="trading"
+          APP="a01_bsp_pulldaily_sheet_full"   # image repo name can keep underscores
+          IMAGE="${REGION}-docker.pkg.dev/${PROJ}/${REPO}/${APP}:${GITHUB_SHA::7}"
+
+          cat > Dockerfile <<'DOCKER'
+          FROM python:3.11-slim
+          WORKDIR /app
+          COPY a_apps/a01_bsp_pullDaily_sheet_full/requirements.txt .
+          RUN pip install --no-cache-dir -r requirements.txt
+          COPY a_apps/a01_bsp_pullDaily_sheet_full/ .
+          ENTRYPOINT ["python","/app/main.py"]
+          DOCKER
+
+          echo "Host:   ${REGION}-docker.pkg.dev"
+          echo "Proj:   ${PROJ}"
+          echo "Region: ${REGION}"
+          echo "Repo:   ${REPO}"
+          echo "App:    ${APP}"
+          echo "Image:  ${IMAGE}"
+
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+
+      - name: Deploy Cloud Run Job
+        env:
+          REGION: ${{ secrets.GCP_REGION }}
+          PROJ:   ${{ secrets.GCP_PROJECT }}
+          SA:     ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          SINCE_IN: ${{ github.event.inputs.since || '2017-01-01' }}
+          PROVIDER_IN: ${{ github.event.inputs.provider || 'binance' }}
+          SYMBOL_IN: ${{ github.event.inputs.symbol || 'BTCUSDT' }}
+          WRITE_MODE_IN: ${{ github.event.inputs.write_mode || 'replace' }}
+        run: |
+          set -euo pipefail
+          JOB="a01-bsp-pulldaily-sheet-full"   # hyphens for Cloud Run Job name
+
+          gcloud run jobs deploy "$JOB" \
+            --image "$IMAGE" \
+            --region "$REGION" \
+            --service-account "$SA" \
+            --set-env-vars SHEET_ID=${SHEET_ID},SHEET_TAB=spot1d,WRITE_MODE=${WRITE_MODE_IN} \
+            --set-env-vars PROVIDER=${PROVIDER_IN},SYMBOL=${SYMBOL_IN},SINCE=${SINCE_IN} \
+            --max-retries=2 \
+            --task-timeout=900s
+
+      - name: Execute Job (wait)
+        env:
+          REGION: ${{ secrets.GCP_REGION }}
+        run: |
+          gcloud run jobs execute a01-bsp-pulldaily-sheet-full --region "$REGION" --wait
+
+      - name: Print Console execution URL
+        env:
+          REGION: ${{ secrets.GCP_REGION }}
+          PROJECT: ${{ secrets.GCP_PROJECT }}
+        run: |
+          JOB_NAME="a01-bsp-pulldaily-sheet-full"
+          echo "Job executions: https://console.cloud.google.com/run/jobs/details/${REGION}/${JOB_NAME}/executions?project=${PROJECT}"
+
+      - name: Comment PR (if any)
+        if: ${{ github.event.pull_request.number }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body \
+            "a01_bsp_pulldaily_sheet_full executed: provider=${{ github.event.inputs.provider || 'binance' }}, symbol=${{ github.event.inputs.symbol || 'BTCUSDT' }}, since=${{ github.event.inputs.since || '2017-01-01' }}. Check Sheet tab **spot1d**."
