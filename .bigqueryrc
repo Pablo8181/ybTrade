@@ -1,0 +1,7 @@
+# Global defaults for bq CLI
+# Docs: https://cloud.google.com/bigquery/docs/bq-command-line-tool
+--location=US
+
+[query]
+--use_legacy_sql=false
+
